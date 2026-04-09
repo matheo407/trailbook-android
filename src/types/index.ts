@@ -1,0 +1,103 @@
+export type Difficulty = 'facile' | 'moyen' | 'difficile';
+export type HikeStatus = 'faite' | 'planifiée';
+export type StopType = 'repas' | 'repos' | 'bivouac' | 'point_de_vue' | 'autre';
+export type GearCategory = 'vêtements' | 'nourriture' | 'équipement' | 'sécurité' | 'navigation' | 'médical' | 'autre';
+
+export interface Coordinate {
+  lat: number;
+  lng: number;
+  ele?: number;
+}
+
+export interface Companion {
+  id: string;
+  name: string;
+  photo?: string;
+  createdAt: string;
+}
+
+export interface GearItem {
+  id: string;
+  name: string;
+  category: GearCategory;
+  photo?: string;
+  notes?: string;
+  weight?: number;
+  createdAt: string;
+}
+
+export interface HikeGearItem {
+  gearId: string;
+  packed: boolean;
+  quantity: number;
+}
+
+export interface RouteSegment {
+  id: string;
+  name: string;
+  coordinates: Coordinate[];
+}
+
+export interface SavedPOI {
+  id: string;
+  name: string;
+  type: string;
+  lat: number;
+  lng: number;
+}
+
+export interface Stop {
+  id: string;
+  hikeId: string;
+  name: string;
+  type: StopType;
+  notes?: string;
+  coordinate?: Coordinate;
+  order: number;
+  mealDetails?: string;
+  journal?: string;
+}
+
+export interface NamedLocation {
+  name: string;
+  lat: number;
+  lng: number;
+}
+
+export interface HikePhoto {
+  url: string;
+  coordinate?: Coordinate;
+  takenAt?: string;
+}
+
+export interface GearTemplate {
+  id: string;
+  name: string;
+  gearIds: string[];
+  createdAt: string;
+}
+
+export interface Hike {
+  id: string;
+  name: string;
+  description?: string;
+  status: HikeStatus;
+  date?: string;
+  dateEnd?: string;
+  duration?: number;
+  distance?: number;
+  elevation?: number;
+  difficulty?: Difficulty;
+  photos: HikePhoto[];
+  companionIds: string[];
+  comments?: string;
+  rating?: number;
+  region?: string;
+  gear: HikeGearItem[];
+  departureLocation?: NamedLocation;
+  arrivalLocation?: NamedLocation;
+  tags: string[];
+  routes: RouteSegment[];
+  savedPois: SavedPOI[];
+  createdAt: string;
+}

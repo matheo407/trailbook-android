@@ -1,0 +1,555 @@
+'use client';
+
+import { useState, useEffect } from 'react';
+import { useParams, useRouter } from 'next/navigation';
+import Link from 'next/link';
+import { Hike, Companion, GearItem } from '@/types';
+import { getHike, getAllCompanions, getAllGearItems, getStopsForHike, deleteHike } from '@/lib/db';
+import { formatDate, formatDuration, computeTrailInfo } from '@/lib/utils';
+import DifficultyBadge from '@/components/DifficultyBadge';
+import StatusBadge from '@/components/StatusBadge';
+import RatingStars from '@/components/RatingStars';
+import RouteMap from '@/components/RouteMap';
+import StopCard from '@/components/StopCard';
+import WeatherCard from '@/components/WeatherCard';
+import ElevationProfile from '@/components/ElevationProfile';
+import {
+  ChevronLeft,
+  Pencil,
+  Trash2,
+  Share2,
+  MapPin,
+  Calendar,
+  Ruler,
+  TrendingUp,
+  Clock,
+  Map,
+  Users,
+  FileText,
+  ClipboardList,
+  CheckCircle2,
+  Circle,
+  Navigation,
+  Download,
+} from 'lucide-react';
+import { Stop } from '@/types';
+import { saveHike } from '@/lib/db';
+import { pushRow } from '@/lib/sync';
+import { compressToEncodedURIComponent } from 'lz-string';
+import { exportHikeGPX } from '@/lib/gpx';
+
+export default function HikeDetailPage() {
+  const params = useParams();
+  const router = useRouter();
+  const id = params.id as string;
+
+  const [hike, setHike] = useState<Hike | null>(null);
+  const [companions, setCompanions] = useState<Companion[]>([]);
+  const [stops, setStops] = useState<Stop[]>([]);
+  const [gearItems, setGearItems] = useState<GearItem[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [deleting, setDeleting] = useState(false);
+  const [activePhoto, setActivePhoto] = useState<string | null>(null);
+  const [shareCopied, setShareCopied] = useState(false);
+  const [userPosition, setUserPosition] = useState<{ lat: number; lng: number } | null>(null);
+  const [gpsLoading, setGpsLoading] = useState(false);
+  const [gpsError, setGpsError] = useState('');
+
+  useEffect(() => {
+    async function load() {
+      try {
+        const [h, c, g, s] = await Promise.all([
+          getHike(id),
+          getAllCompanions(),
+          getAllGearItems(),
+          getStopsForHike(id),
+        ]);
+        if (!h) {
+          router.push('/randos');
+          return;
+        }
+        setHike(h);
+        setCompanions(c);
+        setGearItems(g);
+        setStops(s.sort((a, b) => a.order - b.order));
+      } finally {
+        setLoading(false);
+      }
+    }
+    if (typeof window !== 'undefined') load();
+  }, [id, router]);
+
+  const handleDelete = async () => {
+    if (!confirm('Supprimer cette randonnée ? Cette action est irréversible.')) return;
+    setDeleting(true);
+    try {
+      await deleteHike(id);
+      router.push('/randos');
+    } finally {
+      setDeleting(false);
+    }
+  };
+
+  const handleShare = async () => {
+    if (!hike) return;
+    const hikeCompanions = companions.filter((c) => hike.companionIds.includes(c.id));
+
+    // Downsample route coordinates (1 point every 3) to keep URL short
+    const routes = hike.routes
+      .filter((r) => r.coordinates.length > 0)
+      .map((r) => ({
+        name: r.name,
+        coordinates: r.coordinates.filter((_, i) => i % 3 === 0),
+      }));
+
+    const data = {
+      name: hike.name,
+      status: hike.status,
+      date: hike.date,
+      dateEnd: hike.dateEnd,
+      distance: hike.distance,
+      elevation: hike.elevation,
+      duration: hike.duration,
+      difficulty: hike.difficulty,
+      region: hike.region,
+      description: hike.description,
+      rating: hike.rating,
+      comments: hike.comments,
+      tags: hike.tags,
+      departureLocation: hike.departureLocation ? { name: hike.departureLocation.name } : undefined,
+      arrivalLocation: hike.arrivalLocation ? { name: hike.arrivalLocation.name } : undefined,
+      companionNames: hikeCompanions.map((c) => c.name),
+      stops: stops.map((s) => ({
+        name: s.name,
+        type: s.type,
+        notes: s.notes,
+        coordinate: s.coordinate,
+        mealDetails: s.mealDetails,
+        journal: s.journal,
+      })),
+      routes,
+      savedPois: hike.savedPois,
+      sharedAt: new Date().toISOString(),
+    };
+
+    const compressed = compressToEncodedURIComponent(JSON.stringify(data));
+    const url = `${window.location.origin}/share?d=${compressed}`;
+
+    if (navigator.share) {
+      try {
+        await navigator.share({ title: hike.name, text: `Découvre ma rando : ${hike.name}`, url });
+        return;
+      } catch {
+        // user cancelled or share failed, fall through to clipboard
+      }
+    }
+    try {
+      await navigator.clipboard.writeText(url);
+    } catch {
+      window.open(url, '_blank');
+    }
+    setShareCopied(true);
+    setTimeout(() => setShareCopied(false), 3000);
+  };
+
+  const handleLocate = () => {
+    if (!navigator.geolocation) { setGpsError('GPS non disponible'); return; }
+    setGpsLoading(true);
+    setGpsError('');
+    navigator.geolocation.getCurrentPosition(
+      (pos) => {
+        setUserPosition({ lat: pos.coords.latitude, lng: pos.coords.longitude });
+        setGpsLoading(false);
+      },
+      () => {
+        setGpsError('Position introuvable');
+        setGpsLoading(false);
+      },
+      { enableHighAccuracy: true, timeout: 10000 }
+    );
+  };
+
+  const handleExportGPX = () => {
+    if (!hike) return;
+    const gpx = exportHikeGPX(hike, stops);
+    const blob = new Blob([gpx], { type: 'application/gpx+xml' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${hike.name.replace(/\s+/g, '_')}.gpx`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const handleToggleStatus = async () => {
+    if (!hike) return;
+    const newStatus = hike.status === 'faite' ? 'planifiée' : 'faite';
+    const updated = { ...hike, status: newStatus } as typeof hike;
+    setHike(updated);
+    await saveHike(updated);
+    pushRow('hikes', updated as unknown as Record<string, unknown>).catch(() => {});
+  };
+
+  if (loading) {
+    return (
+      <div className="min-h-screen bg-[#F8F9FA] flex items-center justify-center">
+        <div className="w-8 h-8 border-2 border-[#2D6A4F] border-t-transparent rounded-full animate-spin" />
+      </div>
+    );
+  }
+
+  if (!hike) return null;
+
+  const hikeCompanions = companions.filter((c) => hike.companionIds.includes(c.id));
+
+  return (
+    <div className="min-h-screen bg-[#F8F9FA]">
+      {/* Hero */}
+      <div className="relative">
+        <div className="h-40 bg-gradient-to-br from-[#2D6A4F] to-[#52B788]" />
+        <div className="absolute top-0 left-0 right-0 flex items-center justify-between px-4 pt-14 pb-4">
+          <Link href="/randos" className="bg-black/30 backdrop-blur-sm rounded-full p-2 text-white">
+            <ChevronLeft size={20} />
+          </Link>
+          <Link href={`/randos/${id}/edit`} className="bg-black/30 backdrop-blur-sm rounded-full p-2 text-white">
+            <Pencil size={18} />
+          </Link>
+        </div>
+      </div>
+
+      <div className="px-4 -mt-4 relative z-10">
+        {/* Title card */}
+        <div className="bg-white rounded-2xl shadow-sm p-4 mb-4 border border-gray-50">
+          <div className="flex items-start justify-between gap-2 mb-2">
+            <h1 className="text-xl font-bold text-gray-900 flex-1">{hike.name}</h1>
+            <button
+              onClick={handleToggleStatus}
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold border transition-colors active:scale-95 ${
+                hike.status === 'faite'
+                  ? 'bg-[#2D6A4F] text-white border-[#2D6A4F]'
+                  : 'bg-white text-gray-600 border-gray-300'
+              }`}
+            >
+              {hike.status === 'faite'
+                ? <><CheckCircle2 size={13} /> Faite</>
+                : <><Circle size={13} /> Planifiée</>}
+            </button>
+          </div>
+
+          {hike.region && (
+            <div className="flex items-center gap-1 text-sm text-gray-500 mb-3">
+              <MapPin size={13} />
+              {hike.region}
+            </div>
+          )}
+
+          {/* Departure / Arrival */}
+          {(hike.departureLocation || hike.arrivalLocation) && (
+            <div className="flex flex-col gap-1.5 mb-3">
+              {hike.departureLocation && (
+                <div className="flex items-center gap-2 text-xs text-gray-600">
+                  <span className="text-base leading-none">🟢</span>
+                  <span className="font-medium">Départ :</span>
+                  <span>{hike.departureLocation.name}</span>
+                </div>
+              )}
+              {hike.arrivalLocation && (
+                <div className="flex items-center gap-2 text-xs text-gray-600">
+                  <span className="text-base leading-none">🔴</span>
+                  <span className="font-medium">Arrivée :</span>
+                  <span>{hike.arrivalLocation.name}</span>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Info grid */}
+          <div className="grid grid-cols-2 gap-2">
+            {hike.date && (
+              <div className="flex items-center gap-2 bg-gray-50 rounded-xl px-3 py-2">
+                <Calendar size={14} className="text-[#2D6A4F]" />
+                <div>
+                  <p className="text-xs text-gray-400">Date</p>
+                  <p className="text-xs font-semibold text-gray-800">
+                    {formatDate(hike.date)}{hike.dateEnd ? ` → ${formatDate(hike.dateEnd)}` : ''}
+                  </p>
+                </div>
+              </div>
+            )}
+            {hike.distance && (
+              <div className="flex items-center gap-2 bg-gray-50 rounded-xl px-3 py-2">
+                <Ruler size={14} className="text-[#2D6A4F]" />
+                <div>
+                  <p className="text-xs text-gray-400">Distance</p>
+                  <p className="text-xs font-semibold text-gray-800">{hike.distance} km</p>
+                </div>
+              </div>
+            )}
+            {hike.elevation && (
+              <div className="flex items-center gap-2 bg-gray-50 rounded-xl px-3 py-2">
+                <TrendingUp size={14} className="text-[#2D6A4F]" />
+                <div>
+                  <p className="text-xs text-gray-400">Dénivelé</p>
+                  <p className="text-xs font-semibold text-gray-800">{hike.elevation} m</p>
+                </div>
+              </div>
+            )}
+            {hike.duration && (
+              <div className="flex items-center gap-2 bg-gray-50 rounded-xl px-3 py-2">
+                <Clock size={14} className="text-[#2D6A4F]" />
+                <div>
+                  <p className="text-xs text-gray-400">Durée</p>
+                  <p className="text-xs font-semibold text-gray-800">{formatDuration(hike.duration)}</p>
+                </div>
+              </div>
+            )}
+          </div>
+
+          {hike.difficulty && (
+            <div className="mt-3">
+              <DifficultyBadge difficulty={hike.difficulty} />
+            </div>
+          )}
+
+          {hike.status === 'faite' && hike.rating && (
+            <div className="mt-3">
+              <RatingStars value={hike.rating} size={20} />
+            </div>
+          )}
+
+          {hike.tags && hike.tags.length > 0 && (
+            <div className="flex flex-wrap gap-1.5 mt-3">
+              {hike.tags.map((tag) => (
+                <span key={tag} className="inline-flex items-center px-2.5 py-1 bg-[#2D6A4F]/10 text-[#2D6A4F] text-xs font-medium rounded-xl">
+                  #{tag}
+                </span>
+              ))}
+            </div>
+          )}
+        </div>
+
+        {/* Weather */}
+        {hike.status === 'planifiée' && hike.departureLocation && (
+          <section className="mb-4">
+            <WeatherCard location={hike.departureLocation} />
+          </section>
+        )}
+
+        {/* Route map */}
+        {hike.routes.some((s) => s.coordinates.length > 0) && (
+          <section className="mb-4">
+            <div className="flex items-center justify-between mb-2">
+              <div className="flex items-center gap-2">
+                <Map size={16} className="text-[#2D6A4F]" />
+                <h2 className="font-semibold text-gray-900 text-sm">
+                  Tracé{hike.routes.filter((s) => s.coordinates.length > 0).length > 1 ? 's' : ''}
+                </h2>
+              </div>
+              <button
+                onClick={handleLocate}
+                disabled={gpsLoading}
+                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold border transition-colors ${
+                  userPosition
+                    ? 'bg-blue-50 border-blue-200 text-blue-600'
+                    : 'bg-white border-gray-200 text-gray-600'
+                } disabled:opacity-50`}
+              >
+                <Navigation size={13} className={gpsLoading ? 'animate-pulse' : ''} />
+                {gpsLoading ? 'Localisation...' : userPosition ? 'Ma position ✓' : 'Me localiser'}
+              </button>
+            </div>
+            {gpsError && <p className="text-xs text-red-500 mb-2">{gpsError}</p>}
+            <RouteMap routes={hike.routes} stops={stops} userPosition={userPosition ?? undefined} />
+            {userPosition && (() => {
+              const info = computeTrailInfo(userPosition.lat, userPosition.lng, hike.routes, stops);
+              if (!info) return null;
+              const km = info.distanceM >= 1000
+                ? `${(info.distanceM / 1000).toFixed(1)} km`
+                : `${Math.round(info.distanceM)} m`;
+              return (
+                <div className={`mt-2 rounded-2xl px-4 py-3 ${info.offTrackM > 300 ? 'bg-orange-50 border border-orange-200' : 'bg-blue-50 border border-blue-100'}`}>
+                  {info.offTrackM > 300 && (
+                    <p className="text-xs text-orange-600 font-medium mb-1">⚠️ Tu es à {info.offTrackM}m du tracé</p>
+                  )}
+                  <p className="text-xs font-semibold text-gray-700 mb-1">
+                    Prochain arrêt : <span className="text-[#2D6A4F]">{info.nextStopName}</span>
+                  </p>
+                  <div className="flex gap-3 text-xs text-gray-600">
+                    <span>📏 {km}</span>
+                    {info.elevationGain > 0 && <span>⬆️ +{info.elevationGain}m</span>}
+                    {info.elevationLoss > 0 && <span>⬇️ -{info.elevationLoss}m</span>}
+                  </div>
+                </div>
+              );
+            })()}
+          </section>
+        )}
+
+        {/* Elevation profile */}
+        {hike.routes.some((s) => s.coordinates.some((c) => c.ele !== undefined)) && (
+          <section className="mb-4">
+            <ElevationProfile routes={hike.routes} />
+          </section>
+        )}
+
+        {/* Description */}
+        {hike.description && (
+          <section className="bg-white rounded-2xl shadow-sm p-4 mb-4 border border-gray-50">
+            <h2 className="font-semibold text-gray-900 text-sm mb-2">Description</h2>
+            <p className="text-sm text-gray-600 leading-relaxed">{hike.description}</p>
+          </section>
+        )}
+
+        {/* Companions */}
+        {hikeCompanions.length > 0 && (
+          <section className="bg-white rounded-2xl shadow-sm p-4 mb-4 border border-gray-50">
+            <div className="flex items-center gap-2 mb-3">
+              <Users size={16} className="text-[#2D6A4F]" />
+              <h2 className="font-semibold text-gray-900 text-sm">Compagnons</h2>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              {hikeCompanions.map((c) => (
+                <span
+                  key={c.id}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-green-50 text-green-800 rounded-full text-sm font-medium border border-green-100"
+                >
+                  <span className="w-5 h-5 rounded-full bg-[#2D6A4F] text-white flex items-center justify-center text-xs">
+                    {c.name[0].toUpperCase()}
+                  </span>
+                  {c.name}
+                </span>
+              ))}
+            </div>
+          </section>
+        )}
+
+        {/* Stops */}
+        {stops.length > 0 && (
+          <section className="mb-4">
+            <div className="flex items-center gap-2 mb-2">
+              <ClipboardList size={16} className="text-[#2D6A4F]" />
+              <h2 className="font-semibold text-gray-900 text-sm">Étapes</h2>
+            </div>
+            <div className="space-y-2">
+              {stops.map((stop, index) => (
+                <StopCard key={stop.id} stop={stop} index={index} />
+              ))}
+            </div>
+          </section>
+        )}
+
+        {/* Photos */}
+        {hike.photos.length > 0 && (
+          <section className="bg-white rounded-2xl shadow-sm p-4 mb-4 border border-gray-50">
+            <h2 className="font-semibold text-gray-900 text-sm mb-3">Photos ({hike.photos.length})</h2>
+            <div className="grid grid-cols-3 gap-2">
+              {hike.photos.map((photo, index) => (
+                <button
+                  key={index}
+                  onClick={() => setActivePhoto(photo.url)}
+                  className="aspect-square rounded-xl overflow-hidden bg-gray-100 relative"
+                >
+                  <img src={photo.url} alt={`Photo ${index + 1}`} className="w-full h-full object-cover" />
+                  {photo.coordinate && (
+                    <div className="absolute bottom-1 right-1 bg-black/50 rounded-full p-0.5">
+                      <span className="text-[10px]">📍</span>
+                    </div>
+                  )}
+                </button>
+              ))}
+            </div>
+          </section>
+        )}
+
+        {/* Comments */}
+        {hike.comments && (
+          <section className="bg-white rounded-2xl shadow-sm p-4 mb-4 border border-gray-50">
+            <div className="flex items-center gap-2 mb-2">
+              <FileText size={16} className="text-[#2D6A4F]" />
+              <h2 className="font-semibold text-gray-900 text-sm">Commentaires</h2>
+            </div>
+            <p className="text-sm text-gray-600 leading-relaxed">{hike.comments}</p>
+          </section>
+        )}
+
+        {/* Saved POIs */}
+        {hike.savedPois && hike.savedPois.length > 0 && (
+          <section className="bg-white rounded-2xl shadow-sm p-4 mb-4 border border-gray-50">
+            <div className="flex items-center gap-2 mb-3">
+              <MapPin size={16} className="text-[#2D6A4F]" />
+              <h2 className="font-semibold text-gray-900 text-sm">Points d&apos;intérêt enregistrés</h2>
+            </div>
+            <div className="space-y-2">
+              {hike.savedPois.map((poi) => (
+                <div key={poi.id} className="flex items-center gap-2 py-1.5">
+                  <span className="text-base">📍</span>
+                  <div className="flex-1">
+                    <p className="text-sm font-medium text-gray-800">{poi.name}</p>
+                    <p className="text-xs text-[#2D6A4F]">{poi.type}</p>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </section>
+        )}
+
+        {/* Planning buttons for planned hikes */}
+        {hike.status === 'planifiée' && (
+          <div className="grid grid-cols-2 gap-3 mb-4">
+            <Link
+              href={`/randos/${id}/plan`}
+              className="flex flex-col items-center gap-2 bg-[#2D6A4F] text-white py-4 rounded-2xl font-semibold text-sm shadow-sm active:scale-[0.98] transition-transform"
+            >
+              <ClipboardList size={22} />
+              Planifier
+            </Link>
+            <Link
+              href={`/randos/${id}/pois`}
+              className="flex flex-col items-center gap-2 bg-white border border-gray-200 text-gray-700 py-4 rounded-2xl font-semibold text-sm shadow-sm active:scale-[0.98] transition-transform"
+            >
+              <MapPin size={22} className="text-[#2D6A4F]" />
+              Points d&apos;intérêt
+            </Link>
+          </div>
+        )}
+
+        {/* Actions */}
+        <div className="flex gap-2 pb-6">
+          <button
+            onClick={handleShare}
+            className="flex-1 flex items-center justify-center gap-1.5 py-3 px-3 rounded-2xl border border-gray-200 bg-white text-gray-700 text-sm font-semibold shadow-sm active:scale-[0.98] transition-transform"
+          >
+            <Share2 size={15} />
+            {shareCopied ? 'Copié !' : 'Partager'}
+          </button>
+          {hike.routes.some((r) => r.coordinates.length > 0) && (
+            <button
+              onClick={handleExportGPX}
+              className="flex items-center justify-center gap-1.5 py-3 px-3 rounded-2xl border border-gray-200 bg-white text-gray-700 text-sm font-semibold shadow-sm active:scale-[0.98] transition-transform"
+            >
+              <Download size={15} />
+              GPX
+            </button>
+          )}
+          <button
+            onClick={handleDelete}
+            disabled={deleting}
+            className="flex items-center justify-center gap-2 py-3 px-4 rounded-2xl border border-red-200 bg-red-50 text-red-600 text-sm font-semibold active:scale-[0.98] transition-transform"
+          >
+            <Trash2 size={16} />
+          </button>
+        </div>
+      </div>
+
+      {/* Photo lightbox */}
+      {activePhoto && (
+        <div
+          className="fixed inset-0 bg-black/90 z-50 flex items-center justify-center p-4"
+          onClick={() => setActivePhoto(null)}
+        >
+          <img src={activePhoto} alt="Photo" className="max-w-full max-h-full rounded-xl object-contain" />
+        </div>
+      )}
+    </div>
+  );
+}
